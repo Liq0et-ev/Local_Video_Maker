@@ -285,3 +285,93 @@ def test_ask_folders_keeps_defaults_on_enter_and_takes_typed_values(media, tmp_p
     monkeypatch.setattr("builtins.input", lambda _="": next(answers))
     assert main(["--config", str(ini), "--ask-folders"]) == 0
     assert list((new_out / "x").glob("*.mp4")) and not (tmp_path / "out" / "x").exists()
+
+
+# ------------------------------------------------------------------ tuning flags and transition proposal
+def test_all_tuning_flags_reach_the_options():
+    a = build_parser().parse_args([
+        "--weights", "0.5,0.2,0.2,0.1", "--transition", "zoom", "--transition-style", "dynamic",
+        "--transition-sec", "0.4", "--quality", "max", "--crf", "15", "--preset", "slow", "--fps", "30",
+        "--sharpen", "0.4", "--snap", "0", "--max-segments", "3", "--min-segment", "5",
+        "--selection", "proportional", "--no-fill", "--analysis-window", "60", "--min-activity", "2",
+        "--smoothing-window", "21", "--median", "4", "--sample-fps", "3", "--audio-fade-ms", "10",
+        "--audio-bitrate", "256",
+    ])
+    o = apply_overrides(load_config(), a).options
+    assert (o.weight_motion, o.weight_flow, o.weight_loudness, o.weight_audio_change) == (0.5, 0.2, 0.2, 0.1)
+    assert (o.transition, o.transition_style, o.transition_sec) == ("zoom", "dynamic", 0.4)
+    assert (o.quality, o.crf, o.preset, o.fps, o.sharpen) == ("max", 15, "slow", 30.0, 0.4)
+    assert (o.snap_sec, o.max_segments, o.min_segment_sec, o.selection, o.fill_to_target) == (0.0, 3, 5.0, "proportional", False)
+    assert (o.analysis_window_sec, o.min_activity_sec, o.smoothing_window, o.median_sec) == (60, 2, 21, 4)
+    assert (o.sample_fps, o.audio_fade_ms, o.audio_bitrate_kbps) == (3.0, 10, 256)
+
+
+@pytest.mark.parametrize("flags", [["--weights", "1,2,3"], ["--weights", "a,b,c,d"], ["--weights", "0,0,0,0"],
+                                   ["--crf", "99"], ["--sharpen", "5"]])
+def test_bad_tuning_values_are_rejected(flags):
+    with pytest.raises(ValueError):
+        apply_overrides(load_config(), build_parser().parse_args(flags))
+
+
+def test_unknown_choices_are_rejected_by_argparse():
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["--transition", "wobble"])
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["--quality", "ultra"])
+
+
+def test_confirm_dialog_applies_edits_reports_errors_and_lists_catalogue(monkeypatch, capsys):
+    from video_maker.cli import confirm_transitions
+    from video_maker.transitions import plan_from_features
+
+    feats = [{"gap": 10.0, "sim": 0.5, "luma_a": 0.5, "luma_b": 0.5, "energy_a": 0.5, "energy_b": 0.5,
+              "loud_a": 0.3, "loud_b": 0.3}] * 2
+    joins = [((0, 10), (20, 30)), ((20, 30), (40, 50))]
+    plan = plan_from_features(joins, feats, PipelineOptions(transition_style="neutral"))
+    answers = iter(["bogus", "9=fade", "list", "1=zoom, 2=fadeblack:0.5", ""])
+    monkeypatch.setattr("builtins.input", lambda _="": next(answers))
+    result = confirm_transitions(plan)
+    out = capsys.readouterr().out
+    assert [c.key for c in result.choices] == ["zoom", "fadeblack"] and result.choices[1].seconds == 0.5
+    assert "ожидается" in out and "нет стыка" in out and "Доступные переходы" in out and "Предлагаемые переходы" in out
+    # Ctrl+C / closed input accepts the proposal untouched
+    plan2 = plan_from_features(joins, feats, PipelineOptions(transition_style="neutral"))
+    before = [c.key for c in plan2.choices]
+    monkeypatch.setattr("builtins.input", lambda _="": (_ for _ in ()).throw(EOFError()))
+    assert [c.key for c in confirm_transitions(plan2).choices] == before
+
+
+def test_cli_proposes_transitions_and_uses_the_answer(activity_video, tmp_path, monkeypatch, capsys):
+    inp = tmp_path / "in"; inp.mkdir()
+    shutil.copy(activity_video, inp / "act.mp4")
+    ini = write_ini(tmp_path / "c.ini", f"""
+[paths]
+input_dir = {inp}
+output_dir = {tmp_path / 'out'}
+work_dir = {tmp_path / 'work'}
+music_dir = {tmp_path / 'music'}
+[pipeline]
+mode = highlight
+threshold = 0.3
+target_seconds = 40
+buffer_seconds = 1
+[highlight]
+analysis_window_seconds = 120
+min_segment_seconds = 4
+max_segments = 3
+fill_to_target = false
+[subtitles]
+enabled = false
+[music]
+enabled = false
+[video]
+quality = draft
+""")
+    monkeypatch.setattr("video_maker.cli._is_interactive", lambda: True)
+    answers = iter(["all=pushup:0.4", ""])
+    monkeypatch.setattr("builtins.input", lambda _="": next(answers))
+    assert main(["--config", str(ini), "--case", "all"]) == 0
+    out = capsys.readouterr().out
+    assert "Предлагаемые переходы" in out
+    assert out.count("Вытеснение вверх (0.40s)") >= 1 and "transitions:" in out
+    assert list((tmp_path / "out" / "act").glob("*_short.mp4"))

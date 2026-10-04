@@ -89,6 +89,7 @@ class BatchItem:
     seconds: float = 0.0
     error: str | None = None
     notes: list[str] | None = None
+    transitions: list[str] | None = None
 
 
 def run_batch(
@@ -98,6 +99,7 @@ def run_batch(
     log_fn: Callable[[str], None] = print,
     progress: Callable[[int, int, float, str], None] | None = None,
     should_cancel: Callable[[], bool] | None = None,
+    confirm_transitions: Callable | None = None,
 ) -> list[BatchItem]:
     """Convert each video in turn. One failing video never stops the rest."""
     cfg.ensure_dirs()
@@ -124,6 +126,7 @@ def run_batch(
             res = run_pipeline(
                 video, cfg.options, cfg.output_dir, cfg.work_dir, cfg.music_dir,
                 whisper_model=cfg.whisper_model, progress=on_progress, should_cancel=should_cancel,
+                confirm_transitions=confirm_transitions,
             )
         except Cancelled:
             results.append(BatchItem(video, "cancelled", [], time.time() - t0))
@@ -136,8 +139,11 @@ def run_batch(
         log.record(video, cfg.options, res.outputs)
         for note in res.notes:
             log_fn(f"    note: {note}")
+        if res.transitions:
+            log_fn(f"    transitions: {', '.join(res.transitions)}")
         for out in res.outputs:
             log_fn(f"    -> {out}")
-        results.append(BatchItem(video, "done", res.outputs, time.time() - t0, notes=res.notes))
+        results.append(BatchItem(video, "done", res.outputs, time.time() - t0, notes=res.notes,
+                                 transitions=res.transitions))
 
     return results

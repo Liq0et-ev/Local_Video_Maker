@@ -10,9 +10,46 @@ import sys
 from pathlib import Path
 
 from .batch import ProcessingLog, discover_videos, parse_selection, run_batch
-from .config import DEFAULT_CONFIG_FILE, LocalConfig, load_config
+from .config import (
+    DEFAULT_CONFIG_FILE,
+    QUALITY_PROFILES,
+    TRANSITION_KEYS,
+    TRANSITION_MODES,
+    TRANSITION_STYLES,
+    X264_PRESETS,
+    LocalConfig,
+    load_config,
+)
 from .ffmpeg_utils import FFmpegError, probe, require_ffmpeg
 from .subtitles.brand_kits import PRESETS
+from .transitions import TransitionPlan, apply_user_edits, format_catalog, format_plan
+
+
+# (flag, PipelineOptions field, type, choices, help)
+TUNING_FLAGS = [
+    ("--buffer", "buffer_sec", float, None, "highlight: safety seconds kept after each event"),
+    ("--merge-gap", "merge_gap_sec", float, None, "highlight: merge segments closer than this"),
+    ("--analysis-window", "analysis_window_sec", float, None, "seconds used to judge what is 'normal' for the video"),
+    ("--min-activity", "min_activity_sec", float, None, "ignore activity shorter than this"),
+    ("--smoothing-window", "smoothing_window", int, None, "signal smoothing, odd number >= 5"),
+    ("--median", "median_sec", float, None, "bigger = fewer, longer, steadier segments"),
+    ("--sample-fps", "sample_fps", float, None, "analysis frames per second"),
+    ("--min-segment", "min_segment_sec", float, None, "drop highlight segments shorter than this"),
+    ("--max-segments", "max_segments", int, None, "at most N segments (0 = unlimited)"),
+    ("--selection", "selection", str, ["best", "proportional"], "how to reach the target length"),
+    ("--snap", "snap_sec", float, None, "snap cuts to the nearest pause within +-N seconds (0 = off)"),
+    ("--transition", "transition", str, list(TRANSITION_MODES + TRANSITION_KEYS),
+     "ask = propose and confirm, auto = decide silently, or one fixed transition"),
+    ("--transition-style", "transition_style", str, list(TRANSITION_STYLES), "tempo of the transitions"),
+    ("--transition-sec", "transition_sec", float, None, "force one transition duration"),
+    ("--audio-fade-ms", "audio_fade_ms", int, None, "tiny audio fade at each cut (anti-click)"),
+    ("--quality", "quality", str, list(QUALITY_PROFILES), "draft | standard | high | max"),
+    ("--crf", "crf", int, None, "x264 quality 0-51 (lower = better, bigger)"),
+    ("--preset", "preset", str, list(X264_PRESETS), "x264 speed preset"),
+    ("--fps", "fps", float, None, "force a frame rate (default: keep the source rate)"),
+    ("--sharpen", "sharpen", float, None, "0 = off, 0.3-0.8 gentle, up to 2"),
+    ("--audio-bitrate", "audio_bitrate_kbps", int, None, "audio bitrate in kbit/s"),
+]
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -58,7 +95,23 @@ All settings live in config.ini; every flag below overrides it for this run only
     o.add_argument("--music-volume", type=float)
     o.add_argument("--no-subtitles", action="store_true")
     o.add_argument("--no-music", action="store_true")
+
+    q = p.add_argument_group("highlight tuning, cuts, transitions and video quality (override config.ini)")
+    for flag, dest, typ, choices, help_text in TUNING_FLAGS:
+        q.add_argument(flag, dest=dest, type=typ, choices=choices, help=help_text)
+    q.add_argument("--weights", help="signal weights 'motion,flow,loudness,audio_change', e.g. 0.4,0.3,0.2,0.1")
+    q.add_argument("--no-fill", action="store_true", help="do not pad a too-short highlight with context")
     return p
+
+
+def parse_weights(text: str) -> tuple[float, float, float, float]:
+    try:
+        values = [float(x) for x in text.replace(";", ",").split(",")]
+    except ValueError:
+        values = []
+    if len(values) != 4:
+        raise ValueError("--weights needs four numbers: motion,flow,loudness,audio_change")
+    return values[0], values[1], values[2], values[3]
 
 
 def resolve_path(value: str | Path, base: Path) -> Path:
@@ -96,6 +149,14 @@ def apply_overrides(cfg: LocalConfig, a: argparse.Namespace, folders: dict | Non
             "vertical": a.vertical, "brand_kit": a.kit, "language": a.lang, "music_volume": a.music_volume,
         }.items() if v is not None},
     )
+    extra = {dest: getattr(a, dest) for _, dest, *_ in TUNING_FLAGS if getattr(a, dest, None) is not None}
+    opts = dataclasses.replace(opts, **extra)
+    if getattr(a, "weights", None):
+        wm, wf, wl, wc = parse_weights(a.weights)
+        opts = dataclasses.replace(opts, weight_motion=wm, weight_flow=wf, weight_loudness=wl,
+                                   weight_audio_change=wc)
+    if getattr(a, "no_fill", False):
+        opts.fill_to_target = False
     if a.no_subtitles:
         opts.subtitles = False
     if a.no_music:
@@ -200,6 +261,25 @@ def ask_selection(videos: list[Path]) -> list[int]:
         print("  No valid selection, try again.")
 
 
+def confirm_transitions(plan: TransitionPlan) -> TransitionPlan:
+    """Show the proposed transitions and let the user accept (Enter) or change them."""
+    print("\n" + format_plan(plan))
+    print("\n  Enter = принять  |  2=zoom  |  2=alt (другой вариант)  |  3=pushup:0.3 (с длительностью)"
+          "  |  all=fade  |  list = все переходы")
+    while True:
+        answer = _ask("  Ваш выбор: ")
+        if answer is None or answer.lower() in ("", "ok", "y", "yes", "да", "д"):
+            return plan
+        if answer.lower() in ("list", "l", "список"):
+            print("\n" + format_catalog())
+            continue
+        plan, errors = apply_user_edits(plan, answer)
+        for problem in errors:
+            print(f"   ! {problem}")
+        print("\n" + format_plan(plan))
+        print("  Enter = принять, или введите ещё правки.")
+
+
 def main(argv: list[str] | None = None, folders: dict | None = None, folders_base: Path | None = None,
          ask_for_folders: bool = False) -> int:
     """`folders` / `folders_base` come from the constants at the top of main.py."""
@@ -251,8 +331,10 @@ def main(argv: list[str] | None = None, folders: dict | None = None, folders_bas
             print(line)
             last["msg"] = line
 
+    # In a terminal the program proposes transitions and waits for your OK; otherwise it decides itself.
+    confirm = confirm_transitions if _is_interactive() else None
     try:
-        results = run_batch(chosen, cfg, force=args.force, progress=show)
+        results = run_batch(chosen, cfg, force=args.force, progress=show, confirm_transitions=confirm)
     except KeyboardInterrupt:
         print("\n  Interrupted.")
         return 130

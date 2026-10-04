@@ -11,6 +11,7 @@ except ModuleNotFoundError:  # moviepy 2.x
     from moviepy import VideoFileClip
     MOVIEPY_V2 = True
 
+from ..config import EncodeSettings
 from .brand_kits import PRESETS
 from .renderer import SubtitleRenderer
 
@@ -21,8 +22,10 @@ def resolve_style(brand_kit: str | None) -> dict:
     return dict(PRESETS.get(brand_kit or "", DEFAULT_STYLE))
 
 
-def burn_subtitles(input_path: Path, output_path: Path, segments: list[dict], style: dict) -> None:
+def burn_subtitles(input_path: Path, output_path: Path, segments: list[dict], style: dict,
+                   enc: EncodeSettings | None = None) -> None:
     """Render subtitles frame by frame; audio is carried over from the input."""
+    enc = enc or EncodeSettings()
     clip = VideoFileClip(str(input_path))
     renderer = SubtitleRenderer(width=int(clip.w), height=int(clip.h), style=style)
 
@@ -44,10 +47,11 @@ def burn_subtitles(input_path: Path, output_path: Path, segments: list[dict], st
     else:
         out = clip.fl(make_frame, apply_to=["mask"])
 
-    kwargs = dict(codec="libx264", audio_codec="aac", fps=clip.fps or 30, threads=4,
-                  ffmpeg_params=["-pix_fmt", "yuv420p", "-movflags", "+faststart"])
-    if not MOVIEPY_V2:
-        kwargs["preset"] = "medium"
-    out.write_videofile(str(output_path), logger=None, **kwargs)
+    # moviepy's default (crf 23) would silently throw away the quality chosen in config.ini
+    out.write_videofile(
+        str(output_path), logger=None, codec="libx264", audio_codec="aac", fps=clip.fps or 30, threads=4,
+        preset=enc.preset, audio_bitrate=enc.audio_bitrate,
+        ffmpeg_params=["-crf", str(enc.crf), "-pix_fmt", "yuv420p", "-movflags", "+faststart"],
+    )
     clip.close()
     out.close()

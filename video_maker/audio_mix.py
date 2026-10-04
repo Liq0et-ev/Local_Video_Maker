@@ -6,7 +6,7 @@ Random tracks are chained until the video duration is covered, scaled to
 import random
 from pathlib import Path
 
-from .config import AUDIO_EXTENSIONS
+from .config import AUDIO_EXTENSIONS, EncodeSettings
 from .ffmpeg_utils import probe, run
 
 
@@ -34,8 +34,10 @@ def pick_tracks(tracks: list[Path], duration: float, rng: random.Random | None =
     return chosen
 
 
-def add_background_music(video: Path, dst: Path, music_dir: Path, volume: float = 0.2) -> bool:
+def add_background_music(video: Path, dst: Path, music_dir: Path, volume: float = 0.2,
+                         enc: EncodeSettings | None = None) -> bool:
     """Mix music into `video`, writing `dst`. Returns False if no music is available."""
+    enc = enc or EncodeSettings()
     tracks = list_tracks(music_dir)
     if not tracks:
         return False
@@ -58,7 +60,7 @@ def add_background_music(video: Path, dst: Path, music_dir: Path, volume: float 
     else:
         mix = ";[bg]anull[aout]"
     cmd += ["-filter_complex", prep + bg + mix, "-map", "0:v:0", "-map", "[aout]",
-            "-c:v", "copy", "-c:a", "aac", "-b:a", "160k", "-shortest",
+            "-c:v", "copy", "-c:a", "aac", "-b:a", enc.audio_bitrate, "-shortest",
             "-movflags", "+faststart", str(dst)]
     run(cmd)
     return True
