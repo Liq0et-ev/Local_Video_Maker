@@ -1,0 +1,16 @@
+# Speech-to-text for subtitles
+openai-whisper>=20231117
+torch>=2.0.0
+torchaudio>=2.0.0
+
+# Subtitle rendering / video IO
+moviepy>=1.0.3
+Pillow>=10.0.0
+
+# Highlight detection
+numpy>=1.24.0
+opencv-python-headless>=4.8.0
+librosa>=0.10.0
+scipy>=1.11.0
+matplotlib>=3.7.0
+soundfile>=0.12.0

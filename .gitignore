@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+*.log
+
+# user media and results
+input/*
+music/*
+output/*
+work/*
+!input/.gitkeep
+!music/.gitkeep
+!output/.gitkeep

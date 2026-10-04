@@ -1,0 +1,110 @@
+# Local Video Maker
+
+Локальная программа, которая превращает длинные видео из папки в готовые YouTube Shorts. Без Telegram и без интернета
+(кроме первой загрузки модели Whisper): папки с видео, музыкой и результатом задаются в `config.ini`.
+
+```
+папка input ─► поиск динамики / нарезка ─► формат 9:16 ─► субтитры с подсветкой слов ─► музыка ─► папка output
+```
+
+Это локальная версия бота [Sh_Y_Pl_B](https://github.com/Liq0et-ev/Sh_Y_Pl_B) на том же ядре. Ядро собрано из репозиториев
+Dinamic_Control_YouTube_Videos (хайлайты), One_Minute_Videos (нарезка), Semi_Final_Video_Redactor / Youtube_AutoTitles_Creator
+(субтитры Whisper) и Background_Audio (музыка).
+
+## Быстрый старт
+
+Нужны Python 3.10+ и FFmpeg в `PATH` (`ffmpeg -version` и `ffprobe -version` должны работать).
+
+```bash
+python -m venv .venv
+.venv\Scripts\activate          # Linux/Mac: source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+1. Откройте `config.ini` и укажите папки `input_dir`, `music_dir`, `output_dir`.
+2. Положите длинные видео в `input_dir`, а mp3/wav в `music_dir`.
+3. Запустите:
+
+```bash
+python main.py
+```
+
+Программа покажет нумерованный список видео с длительностью и пометкой `done` для уже обработанных, и спросит, что делать:
+`all`, `3`, `1,3,5` или `2-5`. Готовые шорты появятся в `output_dir/<имя видео>/`.
+
+## Режимы
+
+- **highlight** — из видео собирается один шорт ~60 с из самых динамичных моментов (движение, оптический поток, громкость,
+  спектральный поток). Три алгоритма: `heuristic` (по умолчанию), `surprisal` (однородный фон), `attention` (смешанный контент).
+- **slice** — видео режется на последовательные клипы 45–60 с без пропусков и перекрытий, каждый становится отдельным шортом
+  (не более `max_clips` на видео).
+
+## config.ini
+
+| Раздел | Параметр | Значение |
+|--------|----------|----------|
+| `[paths]` | `input_dir`, `music_dir`, `output_dir`, `work_dir` | Папки. Относительные считаются от папки с `config.ini`, `~` раскрывается |
+| `[pipeline]` | `mode` | `highlight` или `slice` |
+| | `variant`, `target_seconds`, `threshold`, `buffer_seconds`, `merge_gap_seconds` | Параметры режима highlight |
+| | `min_clip_seconds`, `max_clip_seconds`, `max_clips` | Параметры режима slice |
+| | `vertical` | `blur` (кадр целиком на размытом фоне), `crop` (на весь экран), `off` |
+| `[subtitles]` | `enabled`, `language`, `brand_kit`, `whisper_model` | Язык `auto`/`en`/`ru`; стили `viral_yellow`, `neon_blue`, `fire_red`, `minimal_white`, `gradient_purple` |
+| `[music]` | `enabled`, `volume` | Громкость музыки 0.0–1.0 |
+
+Комментарии после `#` разрешены. Путь не должен содержать ` #` или ` ;` (с пробелом перед ними).
+
+## Параметры командной строки
+
+Любой параметр переопределяет `config.ini` только для этого запуска.
+
+```bash
+python main.py --list                                   # только показать список
+python main.py --case all                               # обработать всё без вопросов
+python main.py --case 2-4 --mode slice --no-music
+python main.py --input-dir D:\Raw --output-dir D:\Shorts --music-dir D:\Music --case all
+python main.py --case 1 --mode highlight --target 45 --variant attention
+python main.py --case all --force                       # переделать уже обработанные
+python main.py --config my_other_config.ini
+```
+
+`python main.py --help` показывает все флаги. Код возврата: 0 — успех, 1 — были ошибки или нет видео, 2 — неверные настройки.
+
+## Журнал обработки
+
+В `output_dir/processing_log.json` запоминается, какие видео уже сделаны (имя, размер, дата изменения, режим). Повторный запуск
+пропускает их. Файл переделывается, если исходник изменился, готовый результат удалён или выбран другой режим. Флаг `--force`
+обрабатывает всё заново. Ошибка на одном видео не останавливает остальные.
+
+## Заметки
+
+- Первый запуск с субтитрами скачивает модель Whisper (для `medium` около 1.5 ГБ). Без видеокарты NVIDIA минутный клип занимает
+  порядка 1–2 минут; для скорости поставьте `whisper_model = small` или `base`.
+- Субтитры определяют только английский и русский язык. Если речи или звуковой дорожки нет, субтитры пропускаются с пометкой.
+- На равномерном видео режим highlight может дать клип короче цели. Тогда уменьшите `threshold` или используйте `slice`.
+- Используйте только видео и музыку, на которые у вас есть права.
+
+## Тесты
+
+```bash
+pip install pytest pytest-asyncio
+python -m pytest
+```
+
+103 теста: конфиг, выбор видео, журнал, ffmpeg, музыка, пайплайн и CLI на синтетических видео. Токены и интернет не нужны.
+
+## Структура
+
+```
+main.py                  точка входа
+config.ini               настройки и папки
+video_maker/
+  cli.py                 меню, флаги, итоговая сводка
+  batch.py               список видео, выбор, журнал, пакетный запуск
+  config.py              чтение config.ini, параметры пайплайна
+  pipeline.py            резка -> 9:16 -> субтитры -> музыка
+  ffmpeg_utils.py        резка, вертикальный формат, склейка
+  slicer.py              план нарезки
+  audio_mix.py           микс музыки
+  highlights/            поиск динамичных моментов
+  subtitles/             Whisper, рендер субтитров, стили
+```
