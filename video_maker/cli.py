@@ -240,7 +240,7 @@ def print_list(videos: list[Path], cfg: LocalConfig) -> None:
         except FFmpegError:
             length = "???"
         name = v.name if len(v.name) <= 46 else v.name[:43] + "..."
-        status = "done" if log.is_done(v, o) else ""
+        status = "done" if log.is_done(v, o, cfg.whisper_model) else ""
         print(f"  {i:>3}  {name:<46} {length:>8}  {status}")
     print()
 

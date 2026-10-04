@@ -3,6 +3,7 @@
 Ported from the selection logic of One_Minute_Videos / Background_Audio (numbered list, "all",
 "1,3,5", "2-5") and the JSON processing log idea of Dinamic_Control_YouTube_Videos.
 """
+import hashlib
 import json
 import time
 from dataclasses import dataclass
@@ -62,16 +63,27 @@ class ProcessingLog:
                 self._data = {}  # a corrupt log must never block processing
 
     @staticmethod
-    def key(video: Path, options: PipelineOptions) -> str:
-        st = video.stat()
-        return f"{video.name}|{st.st_size}|{st.st_mtime_ns}|{options.mode}"
+    def key(video: Path, options: PipelineOptions, whisper_model: str = "") -> str:
+        """Identifies a result: the source file AND every setting that changes the output.
 
-    def is_done(self, video: Path, options: PipelineOptions) -> bool:
-        entry = self._data.get(self.key(video, options))
+        Change quality, transitions, weights, ... and the video is processed again automatically.
+        (`ask` and `auto` give the same kind of result, so switching between them is not a change.)
+        """
+        st = video.stat()
+        settings = options.to_dict()
+        if settings["transition"] == "ask":
+            settings["transition"] = "auto"
+        if options.subtitles:
+            settings["whisper_model"] = whisper_model
+        digest = hashlib.sha1(json.dumps(settings, sort_keys=True).encode("utf-8")).hexdigest()[:12]
+        return f"{video.name}|{st.st_size}|{st.st_mtime_ns}|{options.mode}|{digest}"
+
+    def is_done(self, video: Path, options: PipelineOptions, whisper_model: str = "") -> bool:
+        entry = self._data.get(self.key(video, options, whisper_model))
         return bool(entry) and all(Path(o).exists() for o in entry.get("outputs", []))
 
-    def record(self, video: Path, options: PipelineOptions, outputs: list[Path]) -> None:
-        self._data[self.key(video, options)] = {
+    def record(self, video: Path, options: PipelineOptions, outputs: list[Path], whisper_model: str = "") -> None:
+        self._data[self.key(video, options, whisper_model)] = {
             "outputs": [str(o) for o in outputs],
             "finished": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
@@ -110,8 +122,8 @@ def run_batch(
         if should_cancel and should_cancel():
             results.append(BatchItem(video, "cancelled", []))
             break
-        if not force and log.is_done(video, cfg.options):
-            log_fn(f"[{n}/{len(videos)}] {video.name}: already processed, skipping (use --force to redo)")
+        if not force and log.is_done(video, cfg.options, cfg.whisper_model):
+            log_fn(f"[{n}/{len(videos)}] {video.name}: already processed with these settings, skipping (change a setting or use --force to redo)")
             results.append(BatchItem(video, "skipped", []))
             continue
 
@@ -136,7 +148,7 @@ def run_batch(
             results.append(BatchItem(video, "failed", [], time.time() - t0, error=str(exc)))
             continue
 
-        log.record(video, cfg.options, res.outputs)
+        log.record(video, cfg.options, res.outputs, cfg.whisper_model)
         for note in res.notes:
             log_fn(f"    note: {note}")
         if res.transitions:

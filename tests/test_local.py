@@ -375,3 +375,40 @@ quality = draft
     assert "Предлагаемые переходы" in out
     assert out.count("Вытеснение вверх (0.40s)") >= 1 and "transitions:" in out
     assert list((tmp_path / "out" / "act").glob("*_short.mp4"))
+
+
+# ------------------------------------------------------------------ the log notices changed settings
+def test_log_treats_any_output_relevant_setting_as_a_new_job(tmp_path):
+    video = tmp_path / "v.mp4"; video.write_bytes(b"123")
+    out = tmp_path / "o.mp4"; out.write_bytes(b"x")
+    base = PipelineOptions(subtitles=False)
+    log = ProcessingLog(tmp_path)
+    log.record(video, base, [out])
+    same = ProcessingLog(tmp_path)
+    assert same.is_done(video, base)
+    for change in (dict(quality="max"), dict(crf=15), dict(sharpen=0.5), dict(max_segments=2), dict(snap_sec=0.0),
+                   dict(weight_loudness=0.9), dict(transition="zoom"), dict(brand_kit="neon_blue", subtitles=True),
+                   dict(music=False), dict(threshold_k=1.0)):
+        assert not same.is_done(video, PipelineOptions(**{**base.to_dict(), **change})), change
+
+
+def test_log_ignores_ask_vs_auto_and_whisper_model_without_subtitles(tmp_path):
+    video = tmp_path / "v.mp4"; video.write_bytes(b"123")
+    out = tmp_path / "o.mp4"; out.write_bytes(b"x")
+    ask = PipelineOptions(transition="ask", subtitles=False)
+    log = ProcessingLog(tmp_path)
+    log.record(video, ask, [out], "medium")
+    assert log.is_done(video, PipelineOptions(transition="auto", subtitles=False), "small")   # same result
+    with_subs = PipelineOptions(subtitles=True)
+    log.record(video, with_subs, [out], "medium")
+    assert log.is_done(video, with_subs, "medium") and not log.is_done(video, with_subs, "small")
+
+
+def test_batch_reprocesses_automatically_when_settings_change(media, tmp_path):
+    cfg = make_cfg(tmp_path, media)
+    shutil.copy(media["wide"], cfg.input_dir / "one.mp4")
+    videos = discover_videos(cfg.input_dir)
+    assert [r.status for r in run_batch(videos, cfg, log_fn=lambda m: None)] == ["done"]
+    assert [r.status for r in run_batch(videos, cfg, log_fn=lambda m: None)] == ["skipped"]
+    cfg.options.quality = "standard"                                  # a setting changed -> no --force needed
+    assert [r.status for r in run_batch(videos, cfg, log_fn=lambda m: None)] == ["done"]
