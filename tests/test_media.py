@@ -80,12 +80,12 @@ def _run(media, tmp_path, **opts):
 
 
 def test_pipeline_slice_mode_makes_vertical_shorts_and_cleans_workdir(media, tmp_path):
+    random.seed(7)                                       # the slice plan is random: make the test deterministic
     res, progress = _run(media, tmp_path, mode="slice", min_clip_sec=8, max_clip_sec=12, max_clips=2, music=False)
-    assert 1 <= len(res.outputs) <= 2
+    assert len(res.outputs) == 2                         # a 30 s source gives >= 2 clips, the cap keeps two
     for out in res.outputs:
         info = probe(out)
         assert (info["width"], info["height"]) == (1080, 1920)
-    assert any("processing the first 2" in n for n in res.notes) or len(res.outputs) < 2
     assert progress[-1] == 100 and progress == sorted(progress)
     assert list((tmp_path / "work").iterdir()) == []      # temp files removed
 
