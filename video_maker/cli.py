@@ -34,6 +34,8 @@ All settings live in config.ini; every flag below overrides it for this run only
     p.add_argument("--case", help="which videos to process: all | 3 | 1,3,5 | 2-5")
     p.add_argument("--force", action="store_true", help="re-process videos already in the processing log")
     p.add_argument("--list", action="store_true", dest="list_only", help="only list videos and exit")
+    p.add_argument("--ask-folders", action="store_true",
+                   help="ask for the input / music / output folders at start (Enter keeps the current one)")
 
     g = p.add_argument_group("folders (override config.ini)")
     g.add_argument("--input-dir")
@@ -59,13 +61,32 @@ All settings live in config.ini; every flag below overrides it for this run only
     return p
 
 
-def apply_overrides(cfg: LocalConfig, a: argparse.Namespace) -> LocalConfig:
-    """Return a new config with command-line flags applied on top of config.ini."""
-    base = Path.cwd()
+def resolve_path(value: str | Path, base: Path) -> Path:
+    """Expand ~ and quotes; relative paths are taken from `base`."""
+    p = Path(str(value).strip().strip('"').strip("'")).expanduser()
+    return (p if p.is_absolute() else base / p).resolve()
 
-    def path(v: str) -> Path:
-        p = Path(v).expanduser()
-        return (p if p.is_absolute() else base / p).resolve()
+
+FOLDER_KEYS = ("input_dir", "music_dir", "output_dir", "work_dir")
+
+
+def apply_overrides(cfg: LocalConfig, a: argparse.Namespace, folders: dict | None = None,
+                    folders_base: Path | None = None) -> LocalConfig:
+    """Apply overrides on top of config.ini. Precedence: command-line flag > `folders` (main.py) > config.ini.
+
+    Flag paths are relative to the current directory; `folders` paths are relative to `folders_base`
+    (the folder containing main.py).
+    """
+    cwd = Path.cwd()
+    base = folders_base or cwd
+    chosen: dict[str, Path] = {}
+    for key in FOLDER_KEYS:
+        flag = getattr(a, key, None)
+        preset = (folders or {}).get(key)
+        if flag:
+            chosen[key] = resolve_path(flag, cwd)
+        elif preset:
+            chosen[key] = resolve_path(preset, base)
 
     opts = dataclasses.replace(
         cfg.options,
@@ -81,13 +102,60 @@ def apply_overrides(cfg: LocalConfig, a: argparse.Namespace) -> LocalConfig:
         opts.music = False
     opts.validate()
     return LocalConfig(
-        input_dir=path(a.input_dir) if a.input_dir else cfg.input_dir,
-        music_dir=path(a.music_dir) if a.music_dir else cfg.music_dir,
-        output_dir=path(a.output_dir) if a.output_dir else cfg.output_dir,
-        work_dir=path(a.work_dir) if a.work_dir else cfg.work_dir,
+        input_dir=chosen.get("input_dir", cfg.input_dir),
+        music_dir=chosen.get("music_dir", cfg.music_dir),
+        output_dir=chosen.get("output_dir", cfg.output_dir),
+        work_dir=chosen.get("work_dir", cfg.work_dir),
         whisper_model=a.whisper or cfg.whisper_model,
         options=opts,
     )
+
+
+def _is_interactive() -> bool:
+    return sys.stdin is not None and sys.stdin.isatty()
+
+
+def _ask(prompt: str) -> str | None:
+    """input() that returns None on Ctrl+C / closed stdin."""
+    try:
+        return input(prompt).strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return None
+
+
+def ask_folders(cfg: LocalConfig) -> LocalConfig:
+    """Let the user type the three folders; Enter keeps the shown default."""
+    print("\n  Folders (press Enter to keep the value in brackets):")
+    values = {}
+    for key, label in (("input_dir", "Folder with videos"), ("music_dir", "Folder with music"),
+                       ("output_dir", "Folder for finished shorts")):
+        current = getattr(cfg, key)
+        answer = _ask(f"  {label} [{current}]: ")
+        values[key] = resolve_path(answer, Path.cwd()) if answer else current
+    return dataclasses.replace(cfg, **values)
+
+
+def find_videos(cfg: LocalConfig, interactive: bool) -> tuple[LocalConfig, list[Path] | None]:
+    """Scan input_dir. When it is missing or empty and we can talk to the user, offer to type another folder.
+
+    Returns (config, videos) where videos is None if the folder does not exist, [] if it has no videos.
+    """
+    while True:
+        try:
+            videos: list[Path] | None = discover_videos(cfg.input_dir)
+        except FileNotFoundError:
+            videos = None
+        if videos:
+            return cfg, videos
+        print(f"\n  The input folder {cfg.input_dir} "
+              f"{'does not exist' if videos is None else 'contains no videos'}.")
+        if not interactive:
+            return cfg, videos
+        answer = _ask("  Enter another folder with videos (Enter to quit): ")
+        if not answer:
+            return cfg, videos
+        cfg = dataclasses.replace(cfg, input_dir=resolve_path(answer, Path.cwd()))
 
 
 def fmt_duration(seconds: float) -> str:
@@ -132,7 +200,9 @@ def ask_selection(videos: list[Path]) -> list[int]:
         print("  No valid selection, try again.")
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, folders: dict | None = None, folders_base: Path | None = None,
+         ask_for_folders: bool = False) -> int:
+    """`folders` / `folders_base` come from the constants at the top of main.py."""
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
@@ -140,15 +210,21 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         require_ffmpeg()
-        cfg = apply_overrides(load_config(args.config), args)
-        videos = discover_videos(cfg.input_dir)
+        cfg = apply_overrides(load_config(args.config), args, folders, folders_base)
     except (FileNotFoundError, FFmpegError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
 
+    interactive = _is_interactive() and args.case is None and not args.list_only
+    if interactive and (args.ask_folders or ask_for_folders):
+        cfg = ask_folders(cfg)
+    cfg, videos = find_videos(cfg, interactive)
+    if videos is None:
+        print("ERROR: set input_dir in main.py, config.ini or with --input-dir.", file=sys.stderr)
+        return 2
     if not videos:
-        print(f"No videos found in {cfg.input_dir}\nPut files there or change input_dir in config.ini.")
-        return 1
+        print("  Put videos into that folder or point to another one (main.py, config.ini, --input-dir).")
+        return 0
     print_list(videos, cfg)
     if args.list_only:
         return 0

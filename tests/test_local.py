@@ -193,7 +193,7 @@ enabled = false
 
 def test_cli_end_to_end_list_case_and_exit_codes(media, tmp_path, capsys):
     ini = _ini(tmp_path, media)
-    assert main(["--config", str(ini)]) == 1                       # empty input folder
+    assert main(["--config", str(ini)]) == 0                       # empty input folder is not an error
     shutil.copy(media["wide"], tmp_path / "in" / "clip.mp4")
     assert main(["--config", str(ini), "--list"]) == 0
     assert "clip.mp4" in capsys.readouterr().out
@@ -220,3 +220,68 @@ def test_cli_failed_video_gives_nonzero_exit(media, tmp_path):
     ini = _ini(tmp_path, media)
     (tmp_path / "in" / "bad.mp4").write_bytes(b"nope")
     assert main(["--config", str(ini), "--case", "all"]) == 1
+
+
+# ------------------------------------------------------------------ folders given by the user
+def _args(*flags):
+    return build_parser().parse_args(list(flags))
+
+
+def test_folder_precedence_flag_beats_main_py_beats_config_ini(tmp_path):
+    cfg = load_config()
+    base = tmp_path / "proj"
+    folders = {"input_dir": "vids", "music_dir": str(tmp_path / "abs_music"), "output_dir": "", "work_dir": None}
+    new = apply_overrides(cfg, _args(), folders, base)
+    assert new.input_dir == (base / "vids").resolve()              # relative -> main.py folder
+    assert new.music_dir == (tmp_path / "abs_music").resolve()
+    assert new.output_dir == cfg.output_dir and new.work_dir == cfg.work_dir   # empty -> config.ini
+    flagged = apply_overrides(cfg, _args("--input-dir", "from_flag", "--output-dir", str(tmp_path / "o")),
+                              folders, base)
+    assert flagged.input_dir == (Path.cwd() / "from_flag").resolve()           # flag wins, relative to cwd
+    assert flagged.output_dir == (tmp_path / "o").resolve()
+    assert flagged.music_dir == (tmp_path / "abs_music").resolve()
+
+
+def test_main_py_folders_are_used_end_to_end(media, tmp_path):
+    ini = _ini(tmp_path, media)
+    other_in = tmp_path / "my_videos"; other_in.mkdir()
+    shutil.copy(media["wide"], other_in / "mine.mp4")
+    code = main(["--config", str(ini), "--case", "all"],
+                folders={"input_dir": str(other_in), "output_dir": str(tmp_path / "my_shorts")})
+    assert code == 0
+    assert list((tmp_path / "my_shorts" / "mine").glob("*_short_01.mp4"))
+
+
+def test_missing_input_folder_non_interactive_is_an_error_but_empty_is_not(media, tmp_path):
+    ini = _ini(tmp_path, media)
+    assert main(["--config", str(ini), "--input-dir", str(tmp_path / "nope"), "--case", "all"]) == 2
+    assert main(["--config", str(ini), "--case", "all"]) == 0
+
+
+def test_interactive_prompt_offers_another_input_folder(media, tmp_path, monkeypatch):
+    ini = _ini(tmp_path, media)                                    # configured input folder is empty
+    good = tmp_path / "typed"; good.mkdir()
+    shutil.copy(media["wide"], good / "typed.mp4")
+    monkeypatch.setattr("video_maker.cli._is_interactive", lambda: True)
+    answers = iter([str(tmp_path / "does_not_exist"), f'"{good}"', "1"])   # bad path, quoted good path, selection
+    monkeypatch.setattr("builtins.input", lambda _="": next(answers))
+    assert main(["--config", str(ini)]) == 0
+    assert list((tmp_path / "out" / "typed").glob("*.mp4"))
+
+
+def test_interactive_prompt_enter_quits_cleanly(media, tmp_path, monkeypatch):
+    ini = _ini(tmp_path, media)
+    monkeypatch.setattr("video_maker.cli._is_interactive", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda _="": "")
+    assert main(["--config", str(ini)]) == 0
+
+
+def test_ask_folders_keeps_defaults_on_enter_and_takes_typed_values(media, tmp_path, monkeypatch):
+    ini = _ini(tmp_path, media)
+    shutil.copy(media["wide"], tmp_path / "in" / "x.mp4")
+    new_out = tmp_path / "typed_out"
+    monkeypatch.setattr("video_maker.cli._is_interactive", lambda: True)
+    answers = iter(["", "", str(new_out), "1"])                    # keep input, keep music, new output, pick #1
+    monkeypatch.setattr("builtins.input", lambda _="": next(answers))
+    assert main(["--config", str(ini), "--ask-folders"]) == 0
+    assert list((new_out / "x").glob("*.mp4")) and not (tmp_path / "out" / "x").exists()
